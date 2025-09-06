@@ -12,7 +12,7 @@ _C.exp_id = "def"
 _C.resume = ""
 # bs per device, effective bs is scaled by num device
 _C.bs = 4
-_C.epochs = 20
+_C.epochs = 4 #20
 # number of dataloader workers, >= 0
 _C.num_workers = 0
 # 'transition_uniform' or 'task_uniform'
@@ -43,6 +43,7 @@ _C.rvt.gt_hm_sigma = 1.5
 _C.rvt.img_aug = 0.1
 _C.rvt.place_with_mean = True
 _C.rvt.move_pc_in_bound = True
+_C.rvt.use_4point_pose = True
 
 # arguments present in peract official
 _C.peract_official = CN()

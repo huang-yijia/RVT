@@ -28,41 +28,42 @@ from rvt.mvt.raft_utils import ConvexUpSample
 class MVT(nn.Module):
     def __init__(
         self,
-        depth,
-        img_size,
-        add_proprio,
-        proprio_dim,
-        add_lang,
-        lang_dim,
-        lang_len,
-        img_feat_dim,
-        feat_dim,
-        im_channels,
-        attn_dim,
-        attn_heads,
-        attn_dim_head,
-        activation,
-        weight_tie_layers,
-        attn_dropout,
-        decoder_dropout,
-        img_patch_size,
-        final_dim,
-        self_cross_ver,
-        add_corr,
-        norm_corr,
-        add_pixel_loc,
-        add_depth,
-        rend_three_views,
-        use_point_renderer,
-        pe_fix,
-        feat_ver,
-        wpt_img_aug,
-        inp_pre_pro,
-        inp_pre_con,
-        cvx_up,
-        xops,
-        rot_ver,
-        num_rot,
+        depth, # 8
+        img_size, # 220
+        add_proprio, # True
+        proprio_dim, # 4
+        add_lang, # True
+        lang_dim, # 512
+        lang_len, # 77
+        img_feat_dim, # 3
+        feat_dim, # (72 * 3) + 2 + 2 = 220
+        im_channels, # 64
+        attn_dim, # 512
+        attn_heads, # 8
+        attn_dim_head, # 64
+        activation, # lrelu
+        weight_tie_layers, # False
+        attn_dropout, # 0.1
+        decoder_dropout, # 0.0
+        img_patch_size, # 11
+        final_dim, # 64
+        trans_dim, # 1
+        self_cross_ver, # 1
+        add_corr, # True
+        norm_corr, # False
+        add_pixel_loc, # True
+        add_depth, # True
+        rend_three_views, # False
+        use_point_renderer, # False
+        pe_fix, # True
+        feat_ver, # 0
+        wpt_img_aug, # 0.01
+        inp_pre_pro, # True
+        inp_pre_con, # True
+        cvx_up, # False
+        xops, # False
+        rot_ver, # 0
+        num_rot, # 72
         renderer_device="cuda:0",
         renderer=None,
         no_feat=False,
@@ -89,6 +90,7 @@ class MVT(nn.Module):
         :param decoder_dropout:
         :param img_patch_size: intial patch size
         :param final_dim: final dimensions of features
+        :param trans_dim: dimensions of the translation decoder
         :param self_cross_ver:
         :param add_corr:
         :param norm_corr: wether or not to normalize the correspondece values.
@@ -100,7 +102,7 @@ class MVT(nn.Module):
         :param use_point_renderer: whether to use the point renderer or not
         :param pe_fix: matter only when add_lang is True
             Either:
-                True: use position embedding only for image tokens
+                True: use position embedding only for image topkens
                 False: use position embedding for lang and image token
         :param feat_ver: whether to max pool final features or use soft max
             values using the heamtmap
@@ -125,34 +127,35 @@ class MVT(nn.Module):
         """
 
         super().__init__()
-        self.depth = depth
-        self.img_feat_dim = img_feat_dim
-        self.img_size = img_size
-        self.add_proprio = add_proprio
-        self.proprio_dim = proprio_dim
-        self.add_lang = add_lang
-        self.lang_dim = lang_dim
-        self.lang_len = lang_len
-        self.im_channels = im_channels
-        self.img_patch_size = img_patch_size
-        self.final_dim = final_dim
-        self.attn_dropout = attn_dropout
-        self.decoder_dropout = decoder_dropout
-        self.self_cross_ver = self_cross_ver
-        self.add_corr = add_corr
-        self.norm_corr = norm_corr
-        self.add_pixel_loc = add_pixel_loc
-        self.add_depth = add_depth
-        self.pe_fix = pe_fix
-        self.feat_ver = feat_ver
-        self.wpt_img_aug = wpt_img_aug
-        self.inp_pre_pro = inp_pre_pro
-        self.inp_pre_con = inp_pre_con
-        self.cvx_up = cvx_up
-        self.use_point_renderer = use_point_renderer
-        self.rot_ver = rot_ver
-        self.num_rot = num_rot
-        self.no_feat = no_feat
+        self.depth = depth # 8
+        self.img_feat_dim = img_feat_dim # 3
+        self.img_size = img_size # 220
+        self.add_proprio = add_proprio # True
+        self.proprio_dim = proprio_dim # 4
+        self.add_lang = add_lang # True
+        self.lang_dim = lang_dim # 512
+        self.lang_len = lang_len # 77 
+        self.im_channels = im_channels # 64
+        self.img_patch_size = img_patch_size # 11
+        self.final_dim = final_dim # 64
+        self.trans_dim = trans_dim # 1
+        self.attn_dropout = attn_dropout # 0.1
+        self.decoder_dropout = decoder_dropout # 0.0
+        self.self_cross_ver = self_cross_ver # 1
+        self.add_corr = add_corr # True
+        self.norm_corr = norm_corr # False
+        self.add_pixel_loc = add_pixel_loc # True
+        self.add_depth = add_depth # True
+        self.pe_fix = pe_fix # True
+        self.feat_ver = feat_ver # 0
+        self.wpt_img_aug = wpt_img_aug # 0.01
+        self.inp_pre_pro = inp_pre_pro # True
+        self.inp_pre_con = inp_pre_con # True
+        self.cvx_up = cvx_up # False
+        self.use_point_renderer = use_point_renderer # False
+        self.rot_ver = rot_ver # 0
+        self.num_rot = num_rot # 72
+        self.no_feat = no_feat # False
 
         if self.cvx_up:
             assert not self.inp_pre_con, (
@@ -168,35 +171,35 @@ class MVT(nn.Module):
         self.num_img = self.renderer.num_img
 
         # patchified input dimensions
-        spatial_size = img_size // self.img_patch_size  # 128 / 8 = 16
+        spatial_size = img_size // self.img_patch_size  # 220 / 11  = 20
 
         if self.add_proprio:
             # 64 img features + 64 proprio features
-            self.input_dim_before_seq = self.im_channels * 2
+            self.input_dim_before_seq = self.im_channels * 2 # 64 * 2 = 128
         else:
-            self.input_dim_before_seq = self.im_channels
+            self.input_dim_before_seq = self.im_channels 
 
         # learnable positional encoding
         if add_lang:
-            lang_emb_dim, lang_max_seq_len = lang_dim, lang_len
+            lang_emb_dim, lang_max_seq_len = lang_dim, lang_len # 512, 77
         else:
             lang_emb_dim, lang_max_seq_len = 0, 0
-        self.lang_emb_dim = lang_emb_dim
-        self.lang_max_seq_len = lang_max_seq_len
+        self.lang_emb_dim = lang_emb_dim # 512
+        self.lang_max_seq_len = lang_max_seq_len # 77
 
         if self.pe_fix:
-            num_pe_token = spatial_size**2 * self.num_img
+            num_pe_token = spatial_size**2 * self.num_img # 20**2 * 5 = 2000
         else:
             num_pe_token = lang_max_seq_len + (spatial_size**2 * self.num_img)
         self.pos_encoding = nn.Parameter(
             torch.randn(
                 1,
-                num_pe_token,
-                self.input_dim_before_seq,
+                num_pe_token, # 2000
+                self.input_dim_before_seq, # 128
             )
         )
 
-        inp_img_feat_dim = self.img_feat_dim
+        inp_img_feat_dim = self.img_feat_dim # 3
         if self.add_corr:
             inp_img_feat_dim += 3
         if self.add_pixel_loc:
@@ -219,14 +222,14 @@ class MVT(nn.Module):
         # img input preprocessing encoder
         if self.inp_pre_pro:
             self.input_preprocess = Conv2DBlock(
-                inp_img_feat_dim,
-                self.im_channels,
+                inp_img_feat_dim, # 7
+                self.im_channels, # 64
                 kernel_sizes=1,
                 strides=1,
                 norm=None,
-                activation=activation,
+                activation=activation, #lrelu
             )
-            inp_pre_out_dim = self.im_channels
+            inp_pre_out_dim = self.im_channels # 64
         else:
             # identity
             self.input_preprocess = lambda x: x
@@ -235,17 +238,17 @@ class MVT(nn.Module):
         if self.add_proprio:
             # proprio preprocessing encoder
             self.proprio_preprocess = DenseBlock(
-                self.proprio_dim,
-                self.im_channels,
+                self.proprio_dim, # 4
+                self.im_channels, # 64
                 norm="group",
-                activation=activation,
+                activation=activation, # lrelu
             )
 
         self.patchify = Conv2DBlock(
-            inp_pre_out_dim,
-            self.im_channels,
-            kernel_sizes=self.img_patch_size,
-            strides=self.img_patch_size,
+            inp_pre_out_dim, # 64
+            self.im_channels, # 64
+            kernel_sizes=self.img_patch_size, # 11
+            strides=self.img_patch_size, # 11
             norm="group",
             activation=activation,
             padding=0,
@@ -254,33 +257,33 @@ class MVT(nn.Module):
         # lang preprocess
         if self.add_lang:
             self.lang_preprocess = DenseBlock(
-                lang_emb_dim,
-                self.im_channels * 2,
+                lang_emb_dim, # 512
+                self.im_channels * 2, # 128
                 norm="group",
                 activation=activation,
             )
 
         self.fc_bef_attn = DenseBlock(
-            self.input_dim_before_seq,
-            attn_dim,
+            self.input_dim_before_seq, # 128
+            attn_dim, # 512
             norm=None,
             activation=None,
         )
         self.fc_aft_attn = DenseBlock(
-            attn_dim,
-            self.input_dim_before_seq,
+            attn_dim, # 512
+            self.input_dim_before_seq, # 128
             norm=None,
             activation=None,
         )
 
         get_attn_attn = lambda: PreNorm(
-            attn_dim,
+            attn_dim, # 512
             Attention(
-                attn_dim,
-                heads=attn_heads,
-                dim_head=attn_dim_head,
-                dropout=attn_dropout,
-                use_fast=xops,
+                attn_dim, # 512
+                heads=attn_heads, # 8
+                dim_head=attn_dim_head, # 64
+                dropout=attn_dropout, # 0.1
+                use_fast=xops, # False
             ),
         )
         get_attn_ff = lambda: PreNorm(attn_dim, FeedForward(attn_dim))
@@ -290,9 +293,10 @@ class MVT(nn.Module):
         cache_args = {"_cache": weight_tie_layers}
         attn_depth = depth
 
+        # 8 self-attention layers
         for _ in range(attn_depth):
             self.layers.append(
-                nn.ModuleList([get_attn_attn(**cache_args), get_attn_ff(**cache_args)])
+                nn.ModuleList([get_attn_attn(**cache_args), get_attn_ff(**cache_args)]) 
             )
 
         if cvx_up:
@@ -303,33 +307,34 @@ class MVT(nn.Module):
             )
         else:
             self.up0 = Conv2DUpsampleBlock(
-                self.input_dim_before_seq,
-                self.im_channels,
-                kernel_sizes=self.img_patch_size,
-                strides=self.img_patch_size,
+                self.input_dim_before_seq, # 128
+                self.im_channels, # 64
+                kernel_sizes=self.img_patch_size, # 11
+                strides=self.img_patch_size, # 11
                 norm=None,
                 activation=activation,
-                out_size=self.img_size,
+                out_size=self.img_size, # 220
             )
 
             if self.inp_pre_con:
-                final_inp_dim = self.im_channels + inp_pre_out_dim
+                final_inp_dim = self.im_channels + inp_pre_out_dim # 128
             else:
                 final_inp_dim = self.im_channels
 
             # final layers
             self.final = Conv2DBlock(
-                final_inp_dim,
-                self.im_channels,
+                final_inp_dim, # 128
+                self.im_channels, # 64
                 kernel_sizes=3,
                 strides=1,
                 norm=None,
                 activation=activation,
             )
 
+            # 3D translation decoder (Heatmap)
             self.trans_decoder = Conv2DBlock(
-                self.final_dim,
-                1,
+                self.final_dim, # 64
+                self.trans_dim, # 1
                 kernel_sizes=3,
                 strides=1,
                 norm=None,
@@ -338,16 +343,16 @@ class MVT(nn.Module):
 
         if not self.no_feat:
             feat_fc_dim = 0
-            feat_fc_dim += self.input_dim_before_seq
+            feat_fc_dim += self.input_dim_before_seq # 128
             if self.cvx_up:
                 feat_fc_dim += self.input_dim_before_seq
             else:
-                feat_fc_dim += self.final_dim
+                feat_fc_dim += self.final_dim # 192
 
             def get_feat_fc(
-                _feat_in_size,
-                _feat_out_size,
-                _feat_fc_dim=feat_fc_dim,
+                _feat_in_size, # 960
+                _feat_out_size, # 220
+                _feat_fc_dim=feat_fc_dim, # 192
             ):
                 """
                 _feat_in_size: input feature size
@@ -355,37 +360,38 @@ class MVT(nn.Module):
                 _feat_fc_dim: hidden feature size
                 """
                 layers = [
-                    nn.Linear(_feat_in_size, _feat_fc_dim),
+                    nn.Linear(_feat_in_size, _feat_fc_dim), # 960 -> 192
                     nn.ReLU(),
-                    nn.Linear(_feat_fc_dim, _feat_fc_dim // 2),
+                    nn.Linear(_feat_fc_dim, _feat_fc_dim // 2), # 192 -> 96
                     nn.ReLU(),
-                    nn.Linear(_feat_fc_dim // 2, _feat_out_size),
+                    nn.Linear(_feat_fc_dim // 2, _feat_out_size), # 96 -> 220, 96 -> 4
                 ]
                 feat_fc = nn.Sequential(*layers)
                 return feat_fc
 
-            feat_out_size = feat_dim
+            feat_out_size = feat_dim # (72 * 3) + 2 + 2 = 220
 
             if self.rot_ver == 0:
                 self.feat_fc = get_feat_fc(
-                    self.num_img * feat_fc_dim,
-                    feat_out_size,
-                )
+                    self.num_img * feat_fc_dim, # 5 * 192 = 960
+                    feat_out_size, # 220
+                ) # b, 220
             elif self.rot_ver == 1:
                 assert self.num_rot * 3 <= feat_out_size
-                feat_out_size_ex_rot = feat_out_size - (self.num_rot * 3)
+                feat_out_size_ex_rot = feat_out_size - (self.num_rot * 3) # 220 - (72 * 3) = 4
                 if feat_out_size_ex_rot > 0:
                     self.feat_fc_ex_rot = get_feat_fc(
-                        self.num_img * feat_fc_dim, feat_out_size_ex_rot
-                    )
+                        self.num_img * feat_fc_dim, # 960
+                        feat_out_size_ex_rot, # 4
+                    ) # b, 4
 
-                self.feat_fc_init_bn = nn.BatchNorm1d(self.num_img * feat_fc_dim)
+                self.feat_fc_init_bn = nn.BatchNorm1d(self.num_img * feat_fc_dim) # b, 960
                 self.feat_fc_pe = FixedPositionalEncoding(
                     self.num_img * feat_fc_dim, feat_scale_factor=1
                 )
-                self.feat_fc_x = get_feat_fc(self.num_img * feat_fc_dim, self.num_rot)
-                self.feat_fc_y = get_feat_fc(self.num_img * feat_fc_dim, self.num_rot)
-                self.feat_fc_z = get_feat_fc(self.num_img * feat_fc_dim, self.num_rot)
+                self.feat_fc_x = get_feat_fc(self.num_img * feat_fc_dim, self.num_rot) # b, 72
+                self.feat_fc_y = get_feat_fc(self.num_img * feat_fc_dim, self.num_rot) # b, 72
+                self.feat_fc_z = get_feat_fc(self.num_img * feat_fc_dim, self.num_rot) # b, 72
 
             else:
                 assert False
@@ -425,20 +431,20 @@ class MVT(nn.Module):
         :param rot_x_y: (bs, 2)
         """
 
-        bs, num_img, img_feat_dim, h, w = img.shape
-        num_pat_img = h // self.img_patch_size
-        assert num_img == self.num_img
+        bs, num_img, img_feat_dim, h, w = img.shape # b, 5, 3, 220, 220
+        num_pat_img = h // self.img_patch_size # 220 / 11 = 20
+        assert num_img == self.num_img # 5
         # assert img_feat_dim == self.img_feat_dim
-        assert h == w == self.img_size
+        assert h == w == self.img_size # 220
 
         img = img.view(bs * num_img, img_feat_dim, h, w)
         # preprocess
         # (bs * num_img, im_channels, h, w)
-        d0 = self.input_preprocess(img)
+        d0 = self.input_preprocess(img) # b, 5, 64, 220, 220
 
         # (bs * num_img, im_channels, h, w) ->
         # (bs * num_img, im_channels, h / img_patch_strid, w / img_patch_strid) patches
-        ins = self.patchify(d0)
+        ins = self.patchify(d0) # b, 5, 64, 20, 20
         # (bs, im_channels, num_img, h / img_patch_strid, w / img_patch_strid) patches
         ins = (
             ins.view(
@@ -448,7 +454,7 @@ class MVT(nn.Module):
                 num_pat_img,
                 num_pat_img,
             )
-            .transpose(1, 2)
+            .transpose(1, 2) # b, 64, 5, 20, 20
             .clone()
         )
 
@@ -456,17 +462,17 @@ class MVT(nn.Module):
         _, _, _d, _h, _w = ins.shape
         if self.add_proprio:
             p = self.proprio_preprocess(proprio)  # [B,4] -> [B,64]
-            p = p.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).repeat(1, 1, _d, _h, _w)
-            ins = torch.cat([ins, p], dim=1)  # [B, 128, num_img, np, np]
+            p = p.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).repeat(1, 1, _d, _h, _w) # [B,64,1,1,1] -> [B,64,5,20,20]
+            ins = torch.cat([ins, p], dim=1)  # [B, 128, 5, 20, 20]
 
         # channel last
-        ins = rearrange(ins, "b d ... -> b ... d")  # [B, num_img, np, np, 128]
+        ins = rearrange(ins, "b d ... -> b ... d")  # [B, 5, 20, 20, 128]
 
         # save original shape of input for layer
-        ins_orig_shape = ins.shape
+        ins_orig_shape = ins.shape # b, 5, 20, 20, 128
 
         # flatten patches into sequence
-        ins = rearrange(ins, "b ... d -> b (...) d")  # [B, num_img * np * np, 128]
+        ins = rearrange(ins, "b ... d -> b (...) d")  # [B, 5*20*20, 128] -> [B, 2000, 128]
         # add learable pos encoding
         # only added to image tokens
         if self.pe_fix:
@@ -480,7 +486,7 @@ class MVT(nn.Module):
             )
             l = l.view(bs, self.lang_max_seq_len, -1)
             num_lang_tok = l.shape[1]
-            ins = torch.cat((l, ins), dim=1)  # [B, num_img * np * np + 77, 128]
+            ins = torch.cat((l, ins), dim=1)  # [B, 77 + 2000, 128]
 
         # add learable pos encoding
         if not self.pe_fix:
@@ -523,12 +529,12 @@ class MVT(nn.Module):
         x = rearrange(x, "b ... d -> b d ...")  # [B, 128, num_img, np, np]
 
         feat = []
-        _feat = torch.max(torch.max(x, dim=-1)[0], dim=-1)[0]
-        _feat = _feat.view(bs, -1)
+        _feat = torch.max(torch.max(x, dim=-1)[0], dim=-1)[0] # b, 128, 5
+        _feat = _feat.view(bs, -1) # b, 640
         feat.append(_feat)
 
         x = (
-            x.transpose(1, 2)
+            x.transpose(1, 2) # b, 5, 128, 20, 20
             .clone()
             .view(
                 bs * self.num_img, self.input_dim_before_seq, num_pat_img, num_pat_img
@@ -538,24 +544,26 @@ class MVT(nn.Module):
             trans = self.up0(x)
             trans = trans.view(bs, self.num_img, h, w)
         else:
-            u0 = self.up0(x)
+            u0 = self.up0(x) # b, 5, 64, 220, 220
             if self.inp_pre_con:
-                u0 = torch.cat([u0, d0], dim=1)
-            u = self.final(u0)
+                u0 = torch.cat([u0, d0], dim=1) # b, 5, 128, 220, 220
+            u = self.final(u0) # b, 5, 64, 220, 220
 
             # translation decoder
-            trans = self.trans_decoder(u).view(bs, self.num_img, h, w)
+            # trans = self.trans_decoder(u).view(bs, self.num_img, h, w) # b, 5, 220, 220
+            trans = self.trans_decoder(u).view(bs, self.num_img, self.trans_dim, h, w) # b, 5, 4, 220, 220
 
+        # Below code is for feature extraction, not used for translation extraction
         if not self.no_feat:
             if self.feat_ver == 0:
-                hm = F.softmax(trans.detach().view(bs, self.num_img, h * w), 2).view(
+                # Use only the first point from each camera (index 0)
+                trans_first_point = trans[:, :, 0, :, :]  # b, 5, 220, 220 (select first point)
+                hm = F.softmax(trans_first_point.detach().view(bs, self.num_img, h * w), 2).view(
                     bs * self.num_img, 1, h, w
-                )
+                ) # b * 5, 1, 220, 220
 
                 if self.cvx_up:
-                    # since we donot predict u, we need to get u from x
-                    # x is at a lower resolution than hm, therefore we average
-                    # hm using the fold operation
+                    # since we donot predict u, we need to get u from xout
                     _hm = F.unfold(
                         hm,
                         kernel_size=self.img_patch_size,
@@ -573,17 +581,20 @@ class MVT(nn.Module):
                 else:
                     # (bs * num_img, self.input_dim_before_seq, h, w)
                     # we use the u directly
-                    _hm = hm
-                    _u = u
+                    _hm = hm # b * 5, 1, 220, 220
+                    _u = u # b * 5, 64, 220, 220
 
-                _feat = torch.sum(_hm * _u, dim=[2, 3])
-                _feat = _feat.view(bs, -1)
+                _feat = torch.sum(_hm * _u, dim=[2, 3]) # b * 5, 64
+                _feat = _feat.view(bs, -1) # b, 320
 
             elif self.feat_ver == 1:
+                # Use only the first point from each camera for feature extraction
+                trans_first_point = trans[:, :, 0, :, :]  # b, 5, 220, 220 (select first point)
+                
                 # get wpt_local while testing
                 if not self.training:
                     wpt_local = self.get_wpt(
-                        out={"trans": trans.clone().detach()},
+                        out={"trans": trans_first_point.clone().detach()},
                         dyn_cam_info=None,
                     )
 
@@ -619,41 +630,41 @@ class MVT(nn.Module):
             else:
                 assert False, NotImplementedError
 
-            feat.append(_feat)
+            feat.append(_feat) # [[b,640],[b,320]]
 
-            feat = torch.cat(feat, dim=-1)
+            feat = torch.cat(feat, dim=-1) # b, 960
 
             if self.rot_ver == 0:
-                feat = self.feat_fc(feat)
+                feat = self.feat_fc(feat) # b, 220
                 out = {"feat": feat}
             elif self.rot_ver == 1:
                 # features except rotation
-                feat_ex_rot = self.feat_fc_ex_rot(feat)
+                feat_ex_rot = self.feat_fc_ex_rot(feat) # b, 4
 
                 # batch normalized features for rotation
-                feat_rot = self.feat_fc_init_bn(feat)
-                feat_x = self.feat_fc_x(feat_rot)
+                feat_rot = self.feat_fc_init_bn(feat) # b, 960
+                feat_x = self.feat_fc_x(feat_rot) # b, 72
 
                 if self.training:
-                    rot_x = rot_x_y[..., 0].view(bs, 1)
+                    rot_x = rot_x_y[..., 0].view(bs, 1) # b, 960
                 else:
                     # sample with argmax
-                    rot_x = feat_x.argmax(dim=1, keepdim=True)
+                    rot_x = feat_x.argmax(dim=1, keepdim=True) # b, 960
 
-                rot_x_pe = self.feat_fc_pe(rot_x)
-                feat_y = self.feat_fc_y(feat_rot + rot_x_pe)
+                rot_x_pe = self.feat_fc_pe(rot_x) # b, 960
+                feat_y = self.feat_fc_y(feat_rot + rot_x_pe) # b, 72
 
                 if self.training:
-                    rot_y = rot_x_y[..., 1].view(bs, 1)
+                    rot_y = rot_x_y[..., 1].view(bs, 1) # b, 960
                 else:
-                    rot_y = feat_y.argmax(dim=1, keepdim=True)
-                rot_y_pe = self.feat_fc_pe(rot_y)
-                feat_z = self.feat_fc_z(feat_rot + rot_x_pe + rot_y_pe)
+                    rot_y = feat_y.argmax(dim=1, keepdim=True) # b, 960
+                rot_y_pe = self.feat_fc_pe(rot_y) # b, 960
+                feat_z = self.feat_fc_z(feat_rot + rot_x_pe + rot_y_pe) # b, 72
                 out = {
-                    "feat_ex_rot": feat_ex_rot,
-                    "feat_x": feat_x,
-                    "feat_y": feat_y,
-                    "feat_z": feat_z,
+                    "feat_ex_rot": feat_ex_rot, # b, 4w
+                    "feat_x": feat_x, # b, 72
+                    "feat_y": feat_y, # b, 72
+                    "feat_z": feat_z, # b, 72
                 }
         else:
             out = {}
@@ -671,28 +682,52 @@ class MVT(nn.Module):
         h = w = self.img_size
         bs = out["trans"].shape[0]
 
-        q_trans = out["trans"].view(bs, nc, h * w)
-        hm = torch.nn.functional.softmax(q_trans, 2)
-        hm = hm.view(bs, nc, h, w)
-
-        if dyn_cam_info is None:
-            dyn_cam_info_itr = (None,) * bs
+        # Handle the new trans_dim structure - extract waypoints for all 4 points
+        # out["trans"] can have shape (bs, nc, trans_dim, h, w) where trans_dim = 4
+        # or (bs, nc, h, w) if already processed
+        if len(out["trans"].shape) == 5:
+            # Full trans tensor with trans_dim dimension - extract all 4 points
+            trans_full = out["trans"]  # (bs, nc, trans_dim, h, w)
         else:
-            dyn_cam_info_itr = dyn_cam_info
+            # Already processed to single point - expand to match expected shape
+            trans_full = out["trans"].unsqueeze(2)  # (bs, nc, 1, h, w)
 
-        pred_wpt = [
-            self.renderer.get_max_3d_frm_hm_cube(
-                hm[i : i + 1],
-                fix_cam=True,
-                dyn_cam_info=dyn_cam_info_itr[i : i + 1]
-                if not (dyn_cam_info_itr[i] is None)
-                else None,
-            )
-            for i in range(bs)
-        ]
-        pred_wpt = torch.cat(pred_wpt, 0)
-        if self.use_point_renderer:
-            pred_wpt = pred_wpt.squeeze(1)
+        # Extract waypoints for all trans_dim points
+        all_pred_wpt = []
+        for point_idx in range(trans_full.shape[2]):  # Loop through all 4 points
+            trans_point = trans_full[:, :, point_idx, :, :]  # (bs, nc, h, w)
+            
+            q_trans = trans_point.view(bs, nc, h * w) # b, 5, 220 * 220
+            hm = torch.nn.functional.softmax(q_trans, 2) # b, 5, 220 * 220
+            hm = hm.view(bs, nc, h, w) # b, 5, 220, 220
+
+            if dyn_cam_info is None:
+                dyn_cam_info_itr = (None,) * bs
+            else:
+                dyn_cam_info_itr = dyn_cam_info
+
+            pred_wpt_point = [
+                self.renderer.get_max_3d_frm_hm_cube(
+                    hm[i : i + 1],
+                    fix_cam=True,
+                    dyn_cam_info=dyn_cam_info_itr[i : i + 1]
+                    if not (dyn_cam_info_itr[i] is None)
+                    else None,
+                )
+                for i in range(bs)
+            ]
+            pred_wpt_point = torch.cat(pred_wpt_point, 0)
+            if self.use_point_renderer:
+                pred_wpt_point = pred_wpt_point.squeeze(1)
+            
+            all_pred_wpt.append(pred_wpt_point)
+
+        # Stack all waypoints to get shape (bs, trans_dim, 3)
+        pred_wpt = torch.stack(all_pred_wpt, dim=1)  # (bs, 4, 3)
+
+        # Print shapes to verify we're learning 4 points
+        # print(f"out['trans'] shape: {out['trans'].shape}")
+        # print(f"pred_wpt shape: {pred_wpt.shape}")
 
         assert y_q is None
 

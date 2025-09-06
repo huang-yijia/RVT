@@ -25,6 +25,7 @@ _C.attn_dropout = 0.1
 _C.decoder_dropout = 0.0
 _C.img_patch_size = 11
 _C.final_dim = 64
+_C.trans_dim = 4
 _C.self_cross_ver = 1
 _C.add_corr = True
 _C.norm_corr = False

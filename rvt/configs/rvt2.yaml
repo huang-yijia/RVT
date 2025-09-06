@@ -17,3 +17,4 @@ peract:
 rvt:
   place_with_mean: False
   img_aug: 0.0
+  use_4point_pose: False

@@ -576,6 +576,7 @@ class BoxRenderer:
         :return: tupe of ((num_img, h^3, 1), (h^3, 3))
         """
         x, nc, h, w = hm.shape
+        # x=1, nc=5, h=220, w=220
         assert x == 1
         assert (dyn_cam_info is None) or (
             isinstance(dyn_cam_info, (list, tuple))
@@ -592,6 +593,10 @@ class BoxRenderer:
             pts = torch.linspace(-1 + (1 / res), 1 - (1 / res), res).to(hm.device)
             pts = torch.cartesian_prod(pts, pts, pts)
             self._pts = pts
+        else:
+            # self._pts shape: torch.Size([10648000, 3])
+            # self._pts first 5: [[-0.9954545497894287, -0.9954545497894287, -0.9954545497894287], [-0.9954545497894287, -0.9954545497894287, -0.9863636493682861], [-0.9954545497894287, -0.9954545497894287, -0.9772727489471436], [-0.9954545497894287, -0.9954545497894287, -0.968181848526001], [-0.9954545497894287, -0.9954545497894287, -0.9590908885002136]]
+            pass
 
         pts_hm = []
         if fix_cam:
@@ -606,10 +611,13 @@ class BoxRenderer:
                 self._fix_pts_cam_wei = pts_cam_wei
             else:
                 pts_cam = self._fix_pts_cam
+                # pts_cam shape: torch.Size([5, 42592000]), first 5: [48180, 0, 48181, 1, 48180]
                 pts_cam_wei = self._fix_pts_cam_wei
+                # pts_cam_wei shape: torch.Size([5, 10648000, 4]), first 5: [0.0, 0.0, 0.0, 0.0, 0.0]
                 fix_pts_hm = select_feat_from_hm_cache(
                     pts_cam, hm.transpose(0, 1)[0 : self.num_fix_cam], pts_cam_wei
                 )
+                # fix_pts_hm shape: torch.Size([5, 10648000, 1]), first 5: [0.0, 0.0, 0.0, 0.0, 0.0]
             pts_hm.append(fix_pts_hm)
 
         if not dyn_cam_info is None:
@@ -624,6 +632,7 @@ class BoxRenderer:
             pts_hm.append(dyn_pts_hm)
 
         pts_hm = torch.cat(pts_hm, 0)
+        # pts_hm shape: torch.Size([5, 10648000, 1]), first 5: [0.0, 0.0, 0.0, 0.0, 0.0]
         return pts_hm, self._pts
 
     @torch.no_grad()

@@ -9,8 +9,78 @@ import pdb
 import sys
 
 import torch
+import torch.nn.functional as F
+from pytorch3d.transforms import rotation_6d_to_matrix, matrix_to_rotation_6d
+
 import numpy as np
 import matplotlib.pyplot as plt
+
+import torch
+import torch.nn.functional as F
+from pytorch3d.transforms import matrix_to_rotation_6d
+
+def points4_to_pose(
+    p0: torch.Tensor,
+    p1: torch.Tensor,
+    p2: torch.Tensor,
+    p3: torch.Tensor,
+    *,
+    to_6d: bool = True,
+    close_thresh: float = 0.03,
+    eps: float = 1e-8,
+    align_z_to_p3: bool = True,   # optional: make z point toward p3
+):
+    """
+    From 4 point labels -> (Trans, Rot, gripper_open)
+
+    Shapes: all inputs broadcastable to (..., 3)
+    Returns:
+      trans: (..., 3)
+      rot:   (..., 6) if to_6d else (..., 3, 3)
+      is_open: (...,) boolean
+
+    The code follows the pseudocode on your slide and numbers each step.
+    """
+
+    # 1. (P1 + P2)/2 == Trans
+    trans = (p1 + p2) / 2
+
+    # 2. (P1 - P2)/|P1 - P2| == x (unit vector)
+    x = F.normalize(p1 - p2, dim=-1, eps=eps)
+
+    # 3. (P3 - (P1+P2)/2)/|norm| == z' (unit vector)
+    z_prime = F.normalize(p3 - trans, dim=-1, eps=eps)
+
+    # 4. x cross z' = -y'  (not a unit vector)   ==> y' = -(x × z')
+    # 5. y'/|y'| = y  (unit vector)
+    #    (equivalently, y = normalize(z' × x))
+    y = torch.cross(z_prime, x, dim=-1)
+    y = F.normalize(y, dim=-1, eps=eps)
+
+    # 6. Current y is orthogonal to x and z', but z' is not orthogonal to x
+    #    (No code; this is just the state after step 5)
+
+    # 7. x cross y == z   (now we complete a right-handed, orthonormal frame)
+    z = torch.cross(x, y, dim=-1)
+    z = F.normalize(z, dim=-1, eps=eps)
+
+    # (Optional) Keep z roughly pointing toward P3 to match the figure’s arrowing
+    if align_z_to_p3:
+        toward = torch.sum((p3 - trans) * z, dim=-1, keepdim=True)
+        flip = torch.where(toward < 0, -1.0, 1.0)
+        y = y * flip
+        z = z * flip
+
+    # Stack columns as R = [c1, c2, c3] = [x, y, z]
+    R = torch.stack((x, y, z), dim=-1)  # (..., 3, 3)
+
+    # 8–9. |P0 - P3| < threshold : close ;  > threshold : open
+    gap = torch.linalg.vector_norm(p0 - p3, dim=-1)     # (...)
+    is_open = gap >= close_thresh                       # (...,) boolean
+
+    # Output rotation in desired representation
+    rot = matrix_to_rotation_6d(R) if to_6d else R
+    return trans, rot, is_open
 
 
 def place_pc_in_cube(

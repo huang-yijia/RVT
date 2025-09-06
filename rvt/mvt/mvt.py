@@ -37,6 +37,7 @@ class MVT(nn.Module):
         decoder_dropout,
         img_patch_size,
         final_dim,
+        trans_dim,
         self_cross_ver,
         add_corr,
         norm_corr,

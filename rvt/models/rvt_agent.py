@@ -15,6 +15,7 @@ from scipy.spatial.transform import Rotation
 from torch.cuda.amp import autocast, GradScaler
 from torch.nn.parallel.distributed import DistributedDataParallel
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from pytorch3d import transforms as torch3d_tf
 
 import rvt.utils.peract_utils as peract_utils
 import rvt.mvt.utils as mvt_utils
@@ -83,6 +84,9 @@ def eval_all(
 ):
     bs = len(wpt)
     assert wpt.shape == (bs, 3), wpt
+    # pred_wpt now has shape (bs, 4, 3) - use only the first waypoint for evaluation
+    if len(pred_wpt.shape) == 3:
+        pred_wpt = pred_wpt[:, 0, :]  # Take only the first waypoint (bs, 3)
     assert pred_wpt.shape == (bs, 3), pred_wpt
     assert action_rot.shape == (bs, 4), action_rot
     assert pred_rot_quat.shape == (bs, 4), pred_rot_quat
@@ -165,6 +169,9 @@ def manage_eval_log(
 ):
     bs = len(wpt)
     assert wpt.shape == (bs, 3), wpt
+    # pred_wpt now has shape (bs, 4, 3) - use only the first waypoint for evaluation
+    if len(pred_wpt.shape) == 3:
+        pred_wpt = pred_wpt[:, 0, :]  # Take only the first waypoint (bs, 3)
     assert pred_wpt.shape == (bs, 3), pred_wpt
     assert action_rot.shape == (bs, 4), action_rot
     assert pred_rot_quat.shape == (bs, 4), pred_rot_quat
@@ -270,7 +277,7 @@ class RVTAgent:
     def __init__(
         self,
         network: nn.Module,
-        num_rotation_classes: int,
+        num_rotation_classes: int, #72
         stage_two: bool,
         add_lang: bool,
         amp: bool,
@@ -296,6 +303,7 @@ class RVTAgent:
         rot_ver: int = 0,
         rot_x_y_aug: int = 2,
         log_dir="",
+        use_4point_pose: bool = False,
     ):
         """
         :param gt_hm_sigma: the std of the groundtruth hm, currently for for
@@ -311,8 +319,8 @@ class RVTAgent:
         """
 
         self._network = network
-        self._num_rotation_classes = num_rotation_classes
-        self._rotation_resolution = 360 / self._num_rotation_classes
+        self._num_rotation_classes = num_rotation_classes # 72
+        self._rotation_resolution = 360 / self._num_rotation_classes # 5
         self._lr = lr
         self._image_resolution = image_resolution
         self._lambda_weight_l2 = lambda_weight_l2
@@ -342,6 +350,7 @@ class RVTAgent:
         self.move_pc_in_bound = move_pc_in_bound
         self.rot_ver = rot_ver
         self.rot_x_y_aug = rot_x_y_aug
+        self.use_4point_pose = use_4point_pose
 
         self._cross_entropy_loss = nn.CrossEntropyLoss(reduction="none")
         if isinstance(self._network, DistributedDataParallel):
@@ -349,7 +358,7 @@ class RVTAgent:
         else:
             self._net_mod = self._network
 
-        self.num_all_rot = self._num_rotation_classes * 3
+        self.num_all_rot = self._num_rotation_classes * 3 # 72 * 3 = 216
 
         self.scaler = GradScaler(enabled=self.amp)
 
@@ -470,7 +479,7 @@ class RVTAgent:
 
     def get_q(self, out, dims, only_pred=False, get_q_trans=True):
         """
-        :param out: output of mvt
+        :param out: output of mvt (b, 5, 220, 220)
         :param dims: tensor dimensions (bs, nc, h, w)
         :param only_pred: some speedupds if the q values are meant only for
             prediction
@@ -482,8 +491,13 @@ class RVTAgent:
 
         if get_q_trans:
             pts = None
+            # Handle the new trans_dim structure - use only the first point from each camera
+            # out["trans"] has shape (bs, nc, trans_dim, h, w) where trans_dim = 4
+            # We select the first point (index 0) from each camera
+            trans_first_point = out["trans"][:, :, 0, :, :]  # (bs, nc, h, w)
+            
             # (bs, h*w, nc)
-            q_trans = out["trans"].view(bs, nc, h * w).transpose(1, 2)
+            q_trans = trans_first_point.view(bs, nc, h * w).transpose(1, 2) # b, 220 * 220, 5
             if not only_pred:
                 q_trans = q_trans.clone()
 
@@ -491,7 +505,9 @@ class RVTAgent:
             # q
             if self.stage_two:
                 out = out["mvt2"]
-                q_trans2 = out["trans"].view(bs, nc, h * w).transpose(1, 2)
+                # Handle the same for stage two
+                trans_first_point2 = out["trans"][:, :, 0, :, :]  # (bs, nc, h, w)
+                q_trans2 = trans_first_point2.view(bs, nc, h * w).transpose(1, 2)
                 if not only_pred:
                     q_trans2 = q_trans2.clone()
                 q_trans = torch.cat((q_trans, q_trans2), dim=2)
@@ -503,12 +519,12 @@ class RVTAgent:
 
         if self.rot_ver == 0:
             # (bs, 218)
-            rot_q = out["feat"].view(bs, -1)[:, 0 : self.num_all_rot]
-            grip_q = out["feat"].view(bs, -1)[:, self.num_all_rot : self.num_all_rot + 2]
+            rot_q = out["feat"].view(bs, -1)[:, 0 : self.num_all_rot] # b, 216
+            grip_q = out["feat"].view(bs, -1)[:, self.num_all_rot : self.num_all_rot + 2] # b, 2
             # (bs, 2)
             collision_q = out["feat"].view(bs, -1)[
                 :, self.num_all_rot + 2 : self.num_all_rot + 4
-            ]
+            ] # b, 2
         elif self.rot_ver == 1:
             rot_q = torch.cat((out["feat_x"], out["feat_y"], out["feat_z"]),
                               dim=-1).view(bs, -1)
@@ -829,7 +845,7 @@ class RVTAgent:
 
         continuous_action = np.concatenate(
             (
-                pred_wpt[0].cpu().numpy(),
+                pred_wpt[0, 0, :].cpu().numpy(),  # Use first waypoint from first batch item
                 pred_rot_quat[0],
                 pred_grip[0].cpu().numpy(),
                 pred_coll[0].cpu().numpy(),
@@ -876,32 +892,67 @@ class RVTAgent:
             out, mvt1_or_mvt2, dyn_cam_info, y_q
         )
 
+        # Process waypoints - same for both methods
         pred_wpt = []
-        for _pred_wpt_local, _rev_trans in zip(pred_wpt_local, rev_trans):
-            pred_wpt.append(_rev_trans(_pred_wpt_local))
-        pred_wpt = torch.cat([x.unsqueeze(0) for x in pred_wpt])
+        for i in range(pred_wpt_local.shape[1]):  # Loop through all 4 waypoints
+            pred_wpt_point = []
+            for _pred_wpt_local, _rev_trans in zip(pred_wpt_local[:, i, :], rev_trans):
+                pred_wpt_point.append(_rev_trans(_pred_wpt_local))
+            pred_wpt_point = torch.cat([x.unsqueeze(0) for x in pred_wpt_point])
+            pred_wpt.append(pred_wpt_point)
+        pred_wpt = torch.stack(pred_wpt, dim=1)  # (bs, 4, 3)
 
-        pred_rot = torch.cat(
-            (
-                rot_q[
-                    :,
-                    0 * self._num_rotation_classes : 1 * self._num_rotation_classes,
-                ].argmax(1, keepdim=True),
-                rot_q[
-                    :,
-                    1 * self._num_rotation_classes : 2 * self._num_rotation_classes,
-                ].argmax(1, keepdim=True),
-                rot_q[
-                    :,
-                    2 * self._num_rotation_classes : 3 * self._num_rotation_classes,
-                ].argmax(1, keepdim=True),
-            ),
-            dim=-1,
-        )
-        pred_rot_quat = aug_utils.discrete_euler_to_quaternion(
-            pred_rot.cpu(), self._rotation_resolution
-        )
-        pred_grip = grip_q.argmax(1, keepdim=True)
+        if self.use_4point_pose:
+            # Use points4_to_pose to get rotation and gripper state from the 4 points
+            # Extract the 4 points: p0, p1, p2, p3
+            p0 = pred_wpt[:, 0, :]  # First point
+            p1 = pred_wpt[:, 1, :]  # Second point  
+            p2 = pred_wpt[:, 2, :]  # Third point
+            p3 = pred_wpt[:, 3, :]  # Fourth point
+            
+            # Calculate pose using the 4 points
+            trans, rot_matrix, is_open = mvt_utils.points4_to_pose(
+                p0, p1, p2, p3, 
+                to_6d=False,  # Get rotation matrix
+                align_z_to_p3=True
+            )
+            
+            # Convert rotation matrix to quaternion using pytorch3d
+            # Ensure same output type as original method
+            pred_rot_quat = torch3d_tf.matrix_to_quaternion(rot_matrix)
+            # Convert to numpy float64 to match original method output
+            pred_rot_quat = pred_rot_quat.cpu().numpy().astype('float64')
+            
+            # Convert boolean to same format as original method
+            # Original method: grip_q.argmax(1, keepdim=True) produces (bs, 1) with values 0 or 1
+            # We need to convert boolean to same format and dtype
+            pred_grip = torch.zeros_like(grip_q[:, :1], dtype=torch.int64)  # Same shape and dtype as original
+            pred_grip[is_open, 0] = 1  # Set to 1 if gripper should be open
+            
+        else:
+            pred_rot = torch.cat(
+                (
+                    rot_q[
+                        :,
+                        0 * self._num_rotation_classes : 1 * self._num_rotation_classes,
+                    ].argmax(1, keepdim=True),
+                    rot_q[
+                        :,
+                        1 * self._num_rotation_classes : 2 * self._num_rotation_classes,
+                    ].argmax(1, keepdim=True),
+                    rot_q[
+                        :,
+                        2 * self._num_rotation_classes : 3 * self._num_rotation_classes,
+                    ].argmax(1, keepdim=True),
+                ),
+                dim=-1,
+            )
+            pred_rot_quat = aug_utils.discrete_euler_to_quaternion(
+                pred_rot.cpu(), self._rotation_resolution
+            )
+            pred_grip = grip_q.argmax(1, keepdim=True)
+
+        # Keep collision prediction the same for both methods
         pred_coll = collision_q.argmax(1, keepdim=True)
 
         return pred_wpt, pred_rot_quat, pred_grip, pred_coll
