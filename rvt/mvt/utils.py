@@ -31,15 +31,16 @@ def points4_to_pose(
     align_z_to_p3: bool = True,   # optional: make z point toward p3
 ):
     """
-    From 4 point labels -> (Trans, Rot, gripper_open)
+    From 4 point labels -> (Trans, Rot, gripper_open) - CORRECTED VERSION
+    
+    This function is now a true inverse of pose_to_points4.
+    The key correction: p3 now defines the positive z direction consistently.
 
     Shapes: all inputs broadcastable to (..., 3)
     Returns:
       trans: (..., 3)
       rot:   (..., 6) if to_6d else (..., 3, 3)
       is_open: (...,) boolean
-
-    The code follows the pseudocode on your slide and numbers each step.
     """
 
     # 1. (P1 + P2)/2 == Trans
@@ -48,39 +49,124 @@ def points4_to_pose(
     # 2. (P1 - P2)/|P1 - P2| == x (unit vector)
     x = F.normalize(p1 - p2, dim=-1, eps=eps)
 
-    # 3. (P3 - (P1+P2)/2)/|norm| == z' (unit vector)
-    z_prime = F.normalize(p3 - trans, dim=-1, eps=eps)
+    # 3. CORRECTED: (P3 - (P1+P2)/2)/|norm| == z (unit vector)
+    # Now p3 consistently defines the positive z direction
+    z = F.normalize(p3 - trans, dim=-1, eps=eps)
 
-    # 4. x cross z' = -y'  (not a unit vector)   ==> y' = -(x × z')
-    # 5. y'/|y'| = y  (unit vector)
-    #    (equivalently, y = normalize(z' × x))
-    y = torch.cross(z_prime, x, dim=-1)
+    # 4. y = z × x (completing the right-handed coordinate system)
+    y = torch.cross(z, x, dim=-1)
     y = F.normalize(y, dim=-1, eps=eps)
 
-    # 6. Current y is orthogonal to x and z', but z' is not orthogonal to x
-    #    (No code; this is just the state after step 5)
+    # 5. Ensure orthogonality by recalculating x
+    x = torch.cross(y, z, dim=-1)
+    x = F.normalize(x, dim=-1, eps=eps)
 
-    # 7. x cross y == z   (now we complete a right-handed, orthonormal frame)
-    z = torch.cross(x, y, dim=-1)
-    z = F.normalize(z, dim=-1, eps=eps)
-
-    # (Optional) Keep z roughly pointing toward P3 to match the figure’s arrowing
+    # (Optional) Keep z roughly pointing toward P3 to match the figure's arrowing
     if align_z_to_p3:
         toward = torch.sum((p3 - trans) * z, dim=-1, keepdim=True)
         flip = torch.where(toward < 0, -1.0, 1.0)
         y = y * flip
         z = z * flip
+        x = x * flip
 
     # Stack columns as R = [c1, c2, c3] = [x, y, z]
     R = torch.stack((x, y, z), dim=-1)  # (..., 3, 3)
 
-    # 8–9. |P0 - P3| < threshold : close ;  > threshold : open
+    # 6. |P0 - P3| < threshold : close ;  > threshold : open
     gap = torch.linalg.vector_norm(p0 - p3, dim=-1)     # (...)
     is_open = gap >= close_thresh                       # (...,) boolean
 
     # Output rotation in desired representation
     rot = matrix_to_rotation_6d(R) if to_6d else R
     return trans, rot, is_open
+
+
+def pose_to_points4(
+    trans: torch.Tensor,
+    rot_matrix: torch.Tensor,
+    is_open: torch.Tensor,
+    *,
+    gripper_width: float = 0.04,
+    gripper_length: float = 0.02,
+    eps: float = 1e-8,
+):
+    """
+    Convert pose (translation, rotation matrix, gripper state) to 4 points - CORRECTED VERSION
+    
+    This function is now a true inverse of points4_to_pose.
+    The key correction: p3 is positioned in the positive z direction consistently.
+    
+    Args:
+        trans: (..., 3) translation
+        rot_matrix: (..., 3, 3) rotation matrix
+        is_open: (...,) boolean gripper state
+        gripper_width: width of gripper when closed
+        gripper_length: length of gripper fingers
+        eps: small epsilon for numerical stability
+        
+    Returns:
+        p0, p1, p2, p3: (..., 3) four points representing the gripper pose
+    """
+    # Extract rotation axes from rotation matrix
+    x_axis = rot_matrix[..., :, 0]  # (..., 3)
+    y_axis = rot_matrix[..., :, 1]  # (..., 3)
+    z_axis = rot_matrix[..., :, 2]  # (..., 3)
+    
+    # Calculate gripper finger positions
+    # P1 and P2 are the gripper finger tips along x-axis
+    p1 = trans + (gripper_width / 2) * x_axis
+    p2 = trans - (gripper_width / 2) * x_axis
+    
+    # CORRECTED: P3 is the approach direction along positive z-axis
+    # This ensures consistency with points4_to_pose reconstruction
+    p3 = trans + gripper_length * z_axis
+    
+    # P0 is the gripper base position along z-axis
+    # When gripper is closed, P0 is close to P3
+    # When gripper is open, P0 is further from P3
+    gripper_gap = torch.where(
+        is_open,
+        torch.tensor(0.03, device=trans.device),  # Open gripper gap
+        torch.tensor(0.01, device=trans.device),  # Closed gripper gap
+    )
+    p0 = trans + gripper_gap.unsqueeze(-1) * z_axis
+    
+    return p0, p1, p2, p3
+
+
+def pose_to_points4_from_quat(
+    trans: torch.Tensor,
+    quat: torch.Tensor,
+    is_open: torch.Tensor,
+    *,
+    gripper_width: float = 0.04,
+    gripper_length: float = 0.02,
+    eps: float = 1e-8,
+):
+    """
+    Convert pose (translation, quaternion, gripper state) to 4 points.
+    Convenience function that handles quaternion input.
+    
+    Args:
+        trans: (..., 3) translation
+        quat: (..., 4) quaternion in xyzw format
+        is_open: (...,) boolean gripper state
+        gripper_width: width of gripper when closed
+        gripper_length: length of gripper fingers
+        eps: small epsilon for numerical stability
+        
+    Returns:
+        p0, p1, p2, p3: (..., 3) four points representing the gripper pose
+    """
+    # Convert quaternion to rotation matrix
+    from pytorch3d.transforms import quaternion_to_matrix
+    rot_matrix = quaternion_to_matrix(quat)
+    
+    # Use the main function
+    return pose_to_points4(trans, rot_matrix, is_open, 
+                          gripper_width=gripper_width, 
+                          gripper_length=gripper_length, 
+                          eps=eps)
 
 
 def place_pc_in_cube(

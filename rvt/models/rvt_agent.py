@@ -566,6 +566,21 @@ class RVTAgent:
         # rotation in quaternion xyzw
         action_rot = action_gripper_pose[:, 3:7]  # (b, 4)
         action_grip = action_rot_grip[:, -1]  # (b,)
+        
+        # Convert ground truth pose to 4 points for 4-point training
+        gt_points4 = None
+        if self.use_4point_pose:
+            # Convert quaternion to rotation matrix
+            action_rot_matrix = torch3d_tf.quaternion_to_matrix(action_rot)
+            # Convert gripper state to boolean
+            action_grip_bool = action_grip.bool()
+            
+            # Generate 4 points from ground truth pose
+            gt_p0, gt_p1, gt_p2, gt_p3 = mvt_utils.pose_to_points4(
+                action_trans_con, action_rot_matrix, action_grip_bool
+            )
+            # Stack to create ground truth 4-point representation (bs, 4, 3)
+            gt_points4 = torch.stack([gt_p0, gt_p1, gt_p2, gt_p3], dim=1)
         lang_goal_embs = replay_sample["lang_goal_embs"][:, -1].float()
         tasks = replay_sample["tasks"]
 
@@ -686,53 +701,100 @@ class RVTAgent:
         loss_log = {}
         if backprop:
             with autocast(enabled=self.amp):
-                # cross-entropy loss
-                trans_loss = self._cross_entropy_loss(q_trans, action_trans).mean()
-                rot_loss_x = rot_loss_y = rot_loss_z = 0.0
-                grip_loss = 0.0
-                collision_loss = 0.0
-                if self.add_rgc_loss:
-                    rot_loss_x = self._cross_entropy_loss(
-                        rot_q[
-                            :,
-                            0 * self._num_rotation_classes : 1 * self._num_rotation_classes,
-                        ],
-                        action_rot_x_one_hot.argmax(-1),
-                    ).mean()
-
-                    rot_loss_y = self._cross_entropy_loss(
-                        rot_q[
-                            :,
-                            1 * self._num_rotation_classes : 2 * self._num_rotation_classes,
-                        ],
-                        action_rot_y_one_hot.argmax(-1),
-                    ).mean()
-
-                    rot_loss_z = self._cross_entropy_loss(
-                        rot_q[
-                            :,
-                            2 * self._num_rotation_classes : 3 * self._num_rotation_classes,
-                        ],
-                        action_rot_z_one_hot.argmax(-1),
-                    ).mean()
-
-                    grip_loss = self._cross_entropy_loss(
-                        grip_q,
-                        action_grip_one_hot.argmax(-1),
-                    ).mean()
-
+                if self.use_4point_pose:
+                    # 4-point loss calculation
+                    # Get predicted 4 points from network output using the same method as get_pred
+                    pred_wpt_local = self._net_mod.get_wpt(out, True, dyn_cam_info, y_q)
+                    
+                    # Convert predicted waypoints to world coordinates (same as get_pred method)
+                    pred_wpt = []
+                    for i in range(pred_wpt_local.shape[1]):  # Loop through all 4 waypoints
+                        pred_wpt_point = []
+                        for _pred_wpt_local, _rev_trans in zip(pred_wpt_local[:, i, :], rev_trans):
+                            pred_wpt_point.append(_rev_trans(_pred_wpt_local))
+                        pred_wpt_point = torch.cat([x.unsqueeze(0) for x in pred_wpt_point])
+                        pred_wpt.append(pred_wpt_point)
+                    pred_wpt = torch.stack(pred_wpt, dim=1)  # (bs, 4, 3)
+                    
+                    # Compute 4-point MSE loss
+                    points4_loss = torch.nn.functional.mse_loss(pred_wpt, gt_points4)
+                    
+                    # Keep collision loss for 4-point method
                     collision_loss = self._cross_entropy_loss(
                         collision_q, action_collision_one_hot.argmax(-1)
                     ).mean()
+                    
+                    total_loss = points4_loss + collision_loss
+                    
+                    # Update loss log for 4-point method
+                    loss_log = {
+                        "total_loss": total_loss.item(),
+                        "points4_loss": points4_loss.item(),
+                        "collision_loss": collision_loss.item(),
+                        "lr": self._optimizer.param_groups[0]["lr"],
+                    }
+                    
+                else:
+                    # Original loss calculation
+                    # cross-entropy loss
+                    trans_loss = self._cross_entropy_loss(q_trans, action_trans).mean()
+                    rot_loss_x = rot_loss_y = rot_loss_z = 0.0
+                    grip_loss = 0.0
+                    collision_loss = 0.0
+                    if self.add_rgc_loss:
+                        rot_loss_x = self._cross_entropy_loss(
+                            rot_q[
+                                :,
+                                0 * self._num_rotation_classes : 1 * self._num_rotation_classes,
+                            ],
+                            action_rot_x_one_hot.argmax(-1),
+                        ).mean()
 
-                total_loss = (
-                    trans_loss
-                    + rot_loss_x
-                    + rot_loss_y
-                    + rot_loss_z
-                    + grip_loss
-                    + collision_loss
-                )
+                        rot_loss_y = self._cross_entropy_loss(
+                            rot_q[
+                                :,
+                                1 * self._num_rotation_classes : 2 * self._num_rotation_classes,
+                            ],
+                            action_rot_y_one_hot.argmax(-1),
+                        ).mean()
+
+                        rot_loss_z = self._cross_entropy_loss(
+                            rot_q[
+                                :,
+                                2 * self._num_rotation_classes : 3 * self._num_rotation_classes,
+                            ],
+                            action_rot_z_one_hot.argmax(-1),
+                        ).mean()
+
+                        grip_loss = self._cross_entropy_loss(
+                            grip_q,
+                            action_grip_one_hot.argmax(-1),
+                        ).mean()
+
+                        collision_loss = self._cross_entropy_loss(
+                            collision_q, action_collision_one_hot.argmax(-1)
+                        ).mean()
+
+                    total_loss = (
+                        trans_loss
+                        + rot_loss_x
+                        + rot_loss_y
+                        + rot_loss_z
+                        + grip_loss
+                        + collision_loss
+                    )
+                    
+                    # Update loss log for original method
+                    loss_log = {
+                        "total_loss": total_loss.item(),
+                        "trans_loss": trans_loss.item(),
+                        "rot_loss_x": rot_loss_x.item(),
+                        "rot_loss_y": rot_loss_y.item(),
+                        "rot_loss_z": rot_loss_z.item(),
+                        "grip_loss": grip_loss.item(),
+                        "collision_loss": collision_loss.item(),
+                        "lr": self._optimizer.param_groups[0]["lr"],
+                    }
 
             self._optimizer.zero_grad(set_to_none=True)
             self.scaler.scale(total_loss).backward()
@@ -740,16 +802,6 @@ class RVTAgent:
             self.scaler.update()
             self._lr_sched.step()
 
-            loss_log = {
-                "total_loss": total_loss.item(),
-                "trans_loss": trans_loss.item(),
-                "rot_loss_x": rot_loss_x.item(),
-                "rot_loss_y": rot_loss_y.item(),
-                "rot_loss_z": rot_loss_z.item(),
-                "grip_loss": grip_loss.item(),
-                "collision_loss": collision_loss.item(),
-                "lr": self._optimizer.param_groups[0]["lr"],
-            }
             manage_loss_log(self, loss_log, reset_log=reset_log)
             return_out.update(loss_log)
 
@@ -852,15 +904,15 @@ class RVTAgent:
             )
         )
         if pred_distri:
-            x_distri = rot_grip_q[
+            x_distri = rot_q[
                 0,
                 0 * self._num_rotation_classes : 1 * self._num_rotation_classes,
             ]
-            y_distri = rot_grip_q[
+            y_distri = rot_q[
                 0,
                 1 * self._num_rotation_classes : 2 * self._num_rotation_classes,
             ]
-            z_distri = rot_grip_q[
+            z_distri = rot_q[
                 0,
                 2 * self._num_rotation_classes : 3 * self._num_rotation_classes,
             ]
