@@ -567,20 +567,6 @@ class RVTAgent:
         action_rot = action_gripper_pose[:, 3:7]  # (b, 4)
         action_grip = action_rot_grip[:, -1]  # (b,)
         
-        # Convert ground truth pose to 4 points for 4-point training
-        gt_points4 = None
-        if self.use_4point_pose:
-            # Convert quaternion to rotation matrix
-            action_rot_matrix = torch3d_tf.quaternion_to_matrix(action_rot)
-            # Convert gripper state to boolean
-            action_grip_bool = action_grip.bool()
-            
-            # Generate 4 points from ground truth pose
-            gt_p0, gt_p1, gt_p2, gt_p3 = mvt_utils.pose_to_points4(
-                action_trans_con, action_rot_matrix, action_grip_bool
-            )
-            # Stack to create ground truth 4-point representation (bs, 4, 3)
-            gt_points4 = torch.stack([gt_p0, gt_p1, gt_p2, gt_p3], dim=1)
         lang_goal_embs = replay_sample["lang_goal_embs"][:, -1].float()
         tasks = replay_sample["tasks"]
 
@@ -632,6 +618,57 @@ class RVTAgent:
                 rev_trans.append(b)
 
             wpt_local = torch.cat(wpt_local, axis=0)
+            
+            # Create ground truth 4 points in LOCAL coordinates (after transformation)
+            gt_points4 = None
+            if self.use_4point_pose:
+                # Convert quaternion to rotation matrix
+                action_rot_tensor = torch.tensor(action_rot, device=wpt_local.device).float()
+                action_rot_matrix = torch3d_tf.quaternion_to_matrix(action_rot_tensor)
+                # Convert gripper state to boolean
+                action_grip_bool = action_grip.bool()
+                
+                # Generate 4 points from ground truth pose IN LOCAL COORDINATES
+                # Need to transform each ground truth point to local coordinates
+                gt_points4_list = []
+                for i, (_action_trans, _action_rot_matrix, _action_grip_bool, _rev_trans) in enumerate(
+                    zip(action_trans_con, action_rot_matrix, action_grip_bool, rev_trans)
+                ):
+                    # Generate 4 points in world coordinates
+                    gt_p0_world, gt_p1_world, gt_p2_world, gt_p3_world = mvt_utils.pose_to_points4(
+                        _action_trans.unsqueeze(0), _action_rot_matrix.unsqueeze(0), _action_grip_bool.unsqueeze(0)
+                    )
+                    
+                    # Transform each point to local coordinates using the inverse transform
+                    # The rev_trans function transforms from local to world, so we need to find local coords
+                    # that would map to these world coords
+                    # For simplicity, we can use place_pc_in_cube on each point
+                    gt_p0_local, _ = mvt_utils.place_pc_in_cube(
+                        pc[i], gt_p0_world.squeeze(0),
+                        with_mean_or_bounds=self._place_with_mean,
+                        scene_bounds=None if self._place_with_mean else self.scene_bounds,
+                    )
+                    gt_p1_local, _ = mvt_utils.place_pc_in_cube(
+                        pc[i], gt_p1_world.squeeze(0),
+                        with_mean_or_bounds=self._place_with_mean,
+                        scene_bounds=None if self._place_with_mean else self.scene_bounds,
+                    )
+                    gt_p2_local, _ = mvt_utils.place_pc_in_cube(
+                        pc[i], gt_p2_world.squeeze(0),
+                        with_mean_or_bounds=self._place_with_mean,
+                        scene_bounds=None if self._place_with_mean else self.scene_bounds,
+                    )
+                    gt_p3_local, _ = mvt_utils.place_pc_in_cube(
+                        pc[i], gt_p3_world.squeeze(0),
+                        with_mean_or_bounds=self._place_with_mean,
+                        scene_bounds=None if self._place_with_mean else self.scene_bounds,
+                    )
+                    
+                    # Stack the 4 points for this sample
+                    gt_4points_sample = torch.stack([gt_p0_local, gt_p1_local, gt_p2_local, gt_p3_local], dim=0)
+                    gt_points4_list.append(gt_4points_sample.unsqueeze(0))
+                
+                gt_points4 = torch.cat(gt_points4_list, dim=0)  # (bs, 4, 3)
 
             # TODO: Vectorize
             pc = [
@@ -944,17 +981,20 @@ class RVTAgent:
             out, mvt1_or_mvt2, dyn_cam_info, y_q
         )
 
-        # Process waypoints - same for both methods
+        # Process waypoints - handle both 1 point and 4 points cases
         pred_wpt = []
-        for i in range(pred_wpt_local.shape[1]):  # Loop through all 4 waypoints
+        num_points = pred_wpt_local.shape[1]  # 1 for original method, 4 for 4-point method
+        for i in range(num_points):
             pred_wpt_point = []
             for _pred_wpt_local, _rev_trans in zip(pred_wpt_local[:, i, :], rev_trans):
                 pred_wpt_point.append(_rev_trans(_pred_wpt_local))
             pred_wpt_point = torch.cat([x.unsqueeze(0) for x in pred_wpt_point])
             pred_wpt.append(pred_wpt_point)
-        pred_wpt = torch.stack(pred_wpt, dim=1)  # (bs, 4, 3)
+        pred_wpt = torch.stack(pred_wpt, dim=1)  # (bs, num_points, 3)
 
         if self.use_4point_pose:
+            # Ensure we have 4 points for 4-point pose method
+            assert pred_wpt.shape[1] == 4, f"Expected 4 points for 4-point pose, got {pred_wpt.shape[1]}"
             # Use points4_to_pose to get rotation and gripper state from the 4 points
             # Extract the 4 points: p0, p1, p2, p3
             p0 = pred_wpt[:, 0, :]  # First point

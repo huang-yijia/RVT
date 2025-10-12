@@ -43,7 +43,7 @@ _C.rvt.gt_hm_sigma = 1.5
 _C.rvt.img_aug = 0.1
 _C.rvt.place_with_mean = True
 _C.rvt.move_pc_in_bound = True
-_C.rvt.use_4point_pose = True
+_C.rvt.use_4point_pose = True  # Default False for backward compatibility with old models
 
 # arguments present in peract official
 _C.peract_official = CN()

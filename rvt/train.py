@@ -206,6 +206,13 @@ def experiment(rank, cmd_args, devices, port):
             mvt_cfg.merge_from_list(cmd_args.mvt_cfg_opts.split(" "))
 
         mvt_cfg.feat_dim = get_num_feat(exp_cfg.peract)
+        
+        # Set trans_dim based on use_4point_pose for backward compatibility
+        mvt_cfg.defrost()
+        if exp_cfg.rvt.use_4point_pose:
+            mvt_cfg.trans_dim = 4  # Output 4 points
+        else:
+            mvt_cfg.trans_dim = 1  # Output 1 point (original method)
         mvt_cfg.freeze()
 
         # for maintaining backward compatibility
