@@ -121,15 +121,17 @@ def pose_to_points4(
     # This ensures consistency with points4_to_pose reconstruction
     p3 = trans + gripper_length * z_axis
     
-    # P0 is the gripper base position along z-axis
-    # When gripper is closed, P0 is close to P3
-    # When gripper is open, P0 is further from P3
-    gripper_gap = torch.where(
+    # P0 is the gripper base position - distance from P3 indicates gripper state
+    # When gripper is closed, P0 is close to P3 (gap < threshold)
+    # When gripper is open, P0 is far from P3 (gap >= threshold)
+    # P0 is positioned along the opposite direction of z-axis from trans
+    p0_distance = torch.where(
         is_open,
-        torch.tensor(0.03, device=trans.device),  # Open gripper gap
-        torch.tensor(0.01, device=trans.device),  # Closed gripper gap
+        torch.tensor(gripper_length + 0.025, device=trans.device),  # Open: far from P3
+        torch.tensor(gripper_length + 0.005, device=trans.device),  # Closed: close to P3
     )
-    p0 = trans + gripper_gap.unsqueeze(-1) * z_axis
+    # Place p0 in the negative z direction from trans
+    p0 = trans - p0_distance.unsqueeze(-1) * z_axis
     
     return p0, p1, p2, p3
 

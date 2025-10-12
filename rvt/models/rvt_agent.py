@@ -969,6 +969,11 @@ class RVTAgent:
                 align_z_to_p3=True
             )
             
+            # Replace pred_wpt with the calculated translation so act() uses the correct center point
+            # pred_wpt shape: (bs, 4, 3) -> replace first point with center translation
+            pred_wpt = pred_wpt.clone()
+            pred_wpt[:, 0, :] = trans  # Replace first waypoint with center translation
+            
             # Convert rotation matrix to quaternion using pytorch3d
             # Ensure same output type as original method
             pred_rot_quat = torch3d_tf.matrix_to_quaternion(rot_matrix)
