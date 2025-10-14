@@ -491,26 +491,52 @@ class RVTAgent:
 
         if get_q_trans:
             pts = None
-            # Handle the new trans_dim structure - use only the first point from each camera
-            # out["trans"] has shape (bs, nc, trans_dim, h, w) where trans_dim = 4
-            # We select the first point (index 0) from each camera
-            trans_first_point = out["trans"][:, :, 0, :, :]  # (bs, nc, h, w)
+            # out["trans"] has shape (bs, nc, trans_dim, h, w)
+            # For original: trans_dim = 1, for 4-point: trans_dim = 4
+            trans_dim = out["trans"].shape[2]
             
-            # (bs, h*w, nc)
-            q_trans = trans_first_point.view(bs, nc, h * w).transpose(1, 2) # b, 220 * 220, 5
-            if not only_pred:
-                q_trans = q_trans.clone()
-
-            # if two stages, we concatenate the q_trans, and replace all other
-            # q
-            if self.stage_two:
-                out = out["mvt2"]
-                # Handle the same for stage two
-                trans_first_point2 = out["trans"][:, :, 0, :, :]  # (bs, nc, h, w)
-                q_trans2 = trans_first_point2.view(bs, nc, h * w).transpose(1, 2)
+            if trans_dim == 1:
+                # Original method: single heatmap
+                trans_point = out["trans"][:, :, 0, :, :]  # (bs, nc, h, w)
+                q_trans = trans_point.view(bs, nc, h * w).transpose(1, 2)  # (bs, h*w, nc)
                 if not only_pred:
-                    q_trans2 = q_trans2.clone()
-                q_trans = torch.cat((q_trans, q_trans2), dim=2)
+                    q_trans = q_trans.clone()
+                
+                if self.stage_two:
+                    out = out["mvt2"]
+                    trans_point2 = out["trans"][:, :, 0, :, :]
+                    q_trans2 = trans_point2.view(bs, nc, h * w).transpose(1, 2)
+                    if not only_pred:
+                        q_trans2 = q_trans2.clone()
+                    q_trans = torch.cat((q_trans, q_trans2), dim=2)
+            
+            else:
+                # 4-point method: 4 heatmaps (one for each point)
+                # We need to return all 4, stacked
+                # out["trans"]: (bs, nc, 4, h, w)
+                q_trans_list = []
+                for i in range(trans_dim):
+                    trans_point = out["trans"][:, :, i, :, :]  # (bs, nc, h, w)
+                    q_trans_i = trans_point.view(bs, nc, h * w).transpose(1, 2)  # (bs, h*w, nc)
+                    if not only_pred:
+                        q_trans_i = q_trans_i.clone()
+                    q_trans_list.append(q_trans_i)
+                
+                # Stack: (bs, h*w, nc, 4)
+                q_trans = torch.stack(q_trans_list, dim=-1)
+                
+                if self.stage_two:
+                    out = out["mvt2"]
+                    q_trans_list2 = []
+                    for i in range(trans_dim):
+                        trans_point2 = out["trans"][:, :, i, :, :]
+                        q_trans2_i = trans_point2.view(bs, nc, h * w).transpose(1, 2)
+                        if not only_pred:
+                            q_trans2_i = q_trans2_i.clone()
+                        q_trans_list2.append(q_trans2_i)
+                    q_trans2 = torch.stack(q_trans_list2, dim=-1)
+                    # Concatenate along camera dimension: (bs, h*w, nc*2, 4)
+                    q_trans = torch.cat((q_trans, q_trans2), dim=2)
         else:
             pts = None
             q_trans = None
@@ -731,42 +757,50 @@ class RVTAgent:
                 out, dims=(bs, nc, h, w)
             )
 
-            action_trans = self.get_action_trans(
-                wpt_local, pts, out, dyn_cam_info, dims=(bs, nc, h, w)
-            )
+            # Create ground truth heatmaps (pass gt_points4 if using 4-point pose)
+            if self.use_4point_pose:
+                action_trans = self.get_action_trans(
+                    wpt_local, pts, out, dyn_cam_info, dims=(bs, nc, h, w),
+                    gt_points4_local=gt_points4
+                )
+            else:
+                action_trans = self.get_action_trans(
+                    wpt_local, pts, out, dyn_cam_info, dims=(bs, nc, h, w)
+                )
 
         loss_log = {}
         if backprop:
             with autocast(enabled=self.amp):
                 if self.use_4point_pose:
-                    # 4-point loss calculation
-                    # Get predicted 4 points from network output using the same method as get_pred
-                    pred_wpt_local = self._net_mod.get_wpt(out, True, dyn_cam_info, y_q)
+                    # 4-point loss calculation using cross-entropy on heatmaps
+                    # q_trans shape: (bs, h*w, nc, 4) for 4-point method
+                    # action_trans shape: (bs, h*w, nc, 4) for 4-point method
                     
-                    # Convert predicted waypoints to world coordinates (same as get_pred method)
-                    pred_wpt = []
-                    for i in range(pred_wpt_local.shape[1]):  # Loop through all 4 waypoints
-                        pred_wpt_point = []
-                        for _pred_wpt_local, _rev_trans in zip(pred_wpt_local[:, i, :], rev_trans):
-                            pred_wpt_point.append(_rev_trans(_pred_wpt_local))
-                        pred_wpt_point = torch.cat([x.unsqueeze(0) for x in pred_wpt_point])
-                        pred_wpt.append(pred_wpt_point)
-                    pred_wpt = torch.stack(pred_wpt, dim=1)  # (bs, 4, 3)
+                    # Compute cross-entropy loss for each of the 4 points
+                    # Extract predictions for each point from q_trans
+                    trans_loss_p0 = self._cross_entropy_loss(q_trans[..., 0], action_trans[..., 0]).mean()
+                    trans_loss_p1 = self._cross_entropy_loss(q_trans[..., 1], action_trans[..., 1]).mean()
+                    trans_loss_p2 = self._cross_entropy_loss(q_trans[..., 2], action_trans[..., 2]).mean()
+                    trans_loss_p3 = self._cross_entropy_loss(q_trans[..., 3], action_trans[..., 3]).mean()
                     
-                    # Compute 4-point MSE loss
-                    points4_loss = torch.nn.functional.mse_loss(pred_wpt, gt_points4)
+                    # Total translation loss is sum of all 4 points
+                    trans_loss = trans_loss_p0 + trans_loss_p1 + trans_loss_p2 + trans_loss_p3
                     
-                    # Keep collision loss for 4-point method
+                    # Collision loss (same as original)
                     collision_loss = self._cross_entropy_loss(
                         collision_q, action_collision_one_hot.argmax(-1)
                     ).mean()
                     
-                    total_loss = points4_loss + collision_loss
+                    total_loss = trans_loss + collision_loss
                     
                     # Update loss log for 4-point method
                     loss_log = {
                         "total_loss": total_loss.item(),
-                        "points4_loss": points4_loss.item(),
+                        "trans_loss": trans_loss.item(),
+                        "trans_loss_p0": trans_loss_p0.item(),
+                        "trans_loss_p1": trans_loss_p1.item(),
+                        "trans_loss_p2": trans_loss_p2.item(),
+                        "trans_loss_p3": trans_loss_p3.item(),
                         "collision_loss": collision_loss.item(),
                         "lr": self._optimizer.param_groups[0]["lr"],
                     }
@@ -995,36 +1029,31 @@ class RVTAgent:
         if self.use_4point_pose:
             # Ensure we have 4 points for 4-point pose method
             assert pred_wpt.shape[1] == 4, f"Expected 4 points for 4-point pose, got {pred_wpt.shape[1]}"
-            # Use points4_to_pose to get rotation and gripper state from the 4 points
-            # Extract the 4 points: p0, p1, p2, p3
-            p0 = pred_wpt[:, 0, :]  # First point
-            p1 = pred_wpt[:, 1, :]  # Second point  
-            p2 = pred_wpt[:, 2, :]  # Third point
-            p3 = pred_wpt[:, 3, :]  # Fourth point
             
-            # Calculate pose using the 4 points
+            # Extract the 4 points: p0, p1, p2, p3
+            p0 = pred_wpt[:, 0, :]  # Base point
+            p1 = pred_wpt[:, 1, :]  # Left finger
+            p2 = pred_wpt[:, 2, :]  # Right finger
+            p3 = pred_wpt[:, 3, :]  # Approach direction
+            
+            # Calculate pose using the 4 points (converts to pose representation)
             trans, rot_matrix, is_open = mvt_utils.points4_to_pose(
                 p0, p1, p2, p3, 
                 to_6d=False,  # Get rotation matrix
                 align_z_to_p3=True
             )
             
-            # Replace pred_wpt with the calculated translation so act() uses the correct center point
-            # pred_wpt shape: (bs, 4, 3) -> replace first point with center translation
-            pred_wpt = pred_wpt.clone()
-            pred_wpt[:, 0, :] = trans  # Replace first waypoint with center translation
+            # Now we have trans, rot, gripper - same as original method would have
+            # Create pred_wpt in same format as original method: (bs, 1, 3) with center translation
+            pred_wpt = trans.unsqueeze(1)  # (bs, 1, 3)
             
-            # Convert rotation matrix to quaternion using pytorch3d
-            # Ensure same output type as original method
+            # Convert rotation matrix to quaternion (same format as original method)
             pred_rot_quat = torch3d_tf.matrix_to_quaternion(rot_matrix)
-            # Convert to numpy float64 to match original method output
             pred_rot_quat = pred_rot_quat.cpu().numpy().astype('float64')
             
-            # Convert boolean to same format as original method
-            # Original method: grip_q.argmax(1, keepdim=True) produces (bs, 1) with values 0 or 1
-            # We need to convert boolean to same format and dtype
-            pred_grip = torch.zeros_like(grip_q[:, :1], dtype=torch.int64)  # Same shape and dtype as original
-            pred_grip[is_open, 0] = 1  # Set to 1 if gripper should be open
+            # Convert gripper boolean to int format (same as original method)
+            pred_grip = torch.zeros((trans.shape[0], 1), dtype=torch.int64, device=trans.device)
+            pred_grip[is_open, 0] = 1
             
         else:
             pred_rot = torch.cat(
@@ -1062,38 +1091,90 @@ class RVTAgent:
         out,
         dyn_cam_info,
         dims,
+        gt_points4_local=None,
     ):
+        """
+        Generate ground truth heatmaps for translation points.
+        For 4-point pose: generates 4 separate heatmaps
+        For original: generates 1 heatmap
+        """
         bs, nc, h, w = dims
-        wpt_img = self._net_mod.get_pt_loc_on_img(
-            wpt_local.unsqueeze(1),
-            mvt1_or_mvt2=True,
-            dyn_cam_info=dyn_cam_info,
-            out=None
-        )
-        assert wpt_img.shape[1] == 1
-        if self.stage_two:
-            wpt_img2 = self._net_mod.get_pt_loc_on_img(
+        
+        if self.use_4point_pose and gt_points4_local is not None:
+            # Generate heatmaps for all 4 points
+            # gt_points4_local: (bs, 4, 3) in local coordinates
+            action_trans_list = []
+            
+            for point_idx in range(4):  # For each of the 4 points
+                # Get the i-th point for all samples: (bs, 3)
+                wpt_i = gt_points4_local[:, point_idx, :]
+                
+                # Project to image coordinates
+                wpt_img = self._net_mod.get_pt_loc_on_img(
+                    wpt_i.unsqueeze(1),  # (bs, 1, 3)
+                    mvt1_or_mvt2=True,
+                    dyn_cam_info=dyn_cam_info,
+                    out=None
+                )
+                assert wpt_img.shape[1] == 1
+                
+                if self.stage_two:
+                    wpt_img2 = self._net_mod.get_pt_loc_on_img(
+                        wpt_i.unsqueeze(1),
+                        mvt1_or_mvt2=False,
+                        dyn_cam_info=dyn_cam_info,
+                        out=out,
+                    )
+                    assert wpt_img2.shape[1] == 1
+                    wpt_img = torch.cat((wpt_img, wpt_img2), dim=-2)
+                
+                # (bs, num_img, 2)
+                wpt_img = wpt_img.squeeze(1)
+                
+                # Generate heatmap for this point
+                action_trans_i = mvt_utils.generate_hm_from_pt(
+                    wpt_img.reshape(-1, 2),
+                    (h, w),
+                    sigma=self.gt_hm_sigma,
+                    thres_sigma_times=3,
+                )
+                nc_actual = nc * 2 if self.stage_two else nc
+                action_trans_i = action_trans_i.view(bs, nc_actual, h * w).transpose(1, 2).clone()
+                action_trans_list.append(action_trans_i)
+            
+            # Stack all 4 heatmaps: list of 4 × (bs, h*w, nc) -> (bs, h*w, nc, 4)
+            action_trans = torch.stack(action_trans_list, dim=-1)  # (bs, h*w, nc, 4)
+            
+        else:
+            # Original method: single point heatmap
+            wpt_img = self._net_mod.get_pt_loc_on_img(
                 wpt_local.unsqueeze(1),
-                mvt1_or_mvt2=False,
+                mvt1_or_mvt2=True,
                 dyn_cam_info=dyn_cam_info,
-                out=out,
+                out=None
             )
-            assert wpt_img2.shape[1] == 1
+            assert wpt_img.shape[1] == 1
+            if self.stage_two:
+                wpt_img2 = self._net_mod.get_pt_loc_on_img(
+                    wpt_local.unsqueeze(1),
+                    mvt1_or_mvt2=False,
+                    dyn_cam_info=dyn_cam_info,
+                    out=out,
+                )
+                assert wpt_img2.shape[1] == 1
+                wpt_img = torch.cat((wpt_img, wpt_img2), dim=-2)
+                nc = nc * 2
 
-            # (bs, 1, 2 * num_img, 2)
-            wpt_img = torch.cat((wpt_img, wpt_img2), dim=-2)
-            nc = nc * 2
+            # (bs, num_img, 2)
+            wpt_img = wpt_img.squeeze(1)
 
-        # (bs, num_img, 2)
-        wpt_img = wpt_img.squeeze(1)
-
-        action_trans = mvt_utils.generate_hm_from_pt(
-            wpt_img.reshape(-1, 2),
-            (h, w),
-            sigma=self.gt_hm_sigma,
-            thres_sigma_times=3,
-        )
-        action_trans = action_trans.view(bs, nc, h * w).transpose(1, 2).clone()
+            action_trans = mvt_utils.generate_hm_from_pt(
+                wpt_img.reshape(-1, 2),
+                (h, w),
+                sigma=self.gt_hm_sigma,
+                thres_sigma_times=3,
+            )
+            action_trans = action_trans.view(bs, nc, h * w).transpose(1, 2).clone()
 
         return action_trans
 
