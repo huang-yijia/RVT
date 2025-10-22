@@ -775,9 +775,10 @@ class RVTAgent:
                     # Total translation loss is sum of all 3 points
                     trans_loss = trans_loss_p0 + trans_loss_p1 + trans_loss_p2
                     
-                    # Gripper loss (same as collision, 2-class classification)
+                    # Gripper loss (same as original)
                     grip_loss = self._cross_entropy_loss(
-                        grip_q, action_grip_one_hot.argmax(-1)
+                        grip_q, 
+                        action_grip_one_hot.argmax(-1),
                     ).mean()
                     
                     # Collision loss (same as original)
@@ -1044,9 +1045,6 @@ class RVTAgent:
             pred_rot_quat = torch3d_tf.matrix_to_quaternion(rot_matrix)
             pred_rot_quat = pred_rot_quat.cpu().numpy().astype('float64')
             
-            # Gripper prediction from classification head (same as collision)
-            pred_grip = grip_q.argmax(1, keepdim=True)
-            
         else:
             pred_rot = torch.cat(
                 (
@@ -1068,10 +1066,9 @@ class RVTAgent:
             pred_rot_quat = aug_utils.discrete_euler_to_quaternion(
                 pred_rot.cpu(), self._rotation_resolution
             )
-            pred_grip = grip_q.argmax(1, keepdim=True)
 
-        # Keep collision prediction the same for both methods
-        pred_coll = collision_q.argmax(1, keepdim=True)
+        pred_grip = grip_q.argmax(1, keepdim=True) # (bs, 1)
+        pred_coll = collision_q.argmax(1, keepdim=True) # (bs, 1)
 
         return pred_wpt, pred_rot_quat, pred_grip, pred_coll
 
