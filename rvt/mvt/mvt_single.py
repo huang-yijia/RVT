@@ -551,7 +551,7 @@ class MVT(nn.Module):
 
             # translation decoder
             # trans = self.trans_decoder(u).view(bs, self.num_img, h, w) # b, 5, 220, 220
-            trans = self.trans_decoder(u).view(bs, self.num_img, self.trans_dim, h, w) # b, 5, 4, 220, 220
+            trans = self.trans_decoder(u).view(bs, self.num_img, self.trans_dim, h, w) # b, 5, trans_dim, 220, 220
 
         # Below code is for feature extraction, not used for translation extraction
         if not self.no_feat:
@@ -682,11 +682,11 @@ class MVT(nn.Module):
         h = w = self.img_size
         bs = out["trans"].shape[0]
 
-        # Handle the new trans_dim structure - extract waypoints for all 4 points
-        # out["trans"] can have shape (bs, nc, trans_dim, h, w) where trans_dim = 4
+        # Handle the trans_dim structure - extract waypoints for all points
+        # out["trans"] can have shape (bs, nc, trans_dim, h, w) where trans_dim = 1 or 3
         # or (bs, nc, h, w) if already processed
         if len(out["trans"].shape) == 5:
-            # Full trans tensor with trans_dim dimension - extract all 4 points
+            # Full trans tensor with trans_dim dimension - extract all points
             trans_full = out["trans"]  # (bs, nc, trans_dim, h, w)
         else:
             # Already processed to single point - expand to match expected shape
@@ -694,7 +694,7 @@ class MVT(nn.Module):
 
         # Extract waypoints for all trans_dim points
         all_pred_wpt = []
-        for point_idx in range(trans_full.shape[2]):  # Loop through all 4 points
+        for point_idx in range(trans_full.shape[2]):  # Loop through all points (1 or 3)
             trans_point = trans_full[:, :, point_idx, :, :]  # (bs, nc, h, w)
             
             q_trans = trans_point.view(bs, nc, h * w) # b, 5, 220 * 220
@@ -723,9 +723,9 @@ class MVT(nn.Module):
             all_pred_wpt.append(pred_wpt_point)
 
         # Stack all waypoints to get shape (bs, trans_dim, 3)
-        pred_wpt = torch.stack(all_pred_wpt, dim=1)  # (bs, 4, 3)
+        pred_wpt = torch.stack(all_pred_wpt, dim=1)  # (bs, trans_dim, 3)
 
-        # Print shapes to verify we're learning 4 points
+        # Print shapes to verify waypoint extraction
         # print(f"out['trans'] shape: {out['trans'].shape}")
         # print(f"pred_wpt shape: {pred_wpt.shape}")
 

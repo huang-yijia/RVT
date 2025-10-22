@@ -13,4 +13,4 @@ peract:
   transform_augmentation_rpy: [0.0, 0.0, 45.0]
 rvt:
   place_with_mean: False
-  use_4point_pose: True
+  use_3point_pose: True

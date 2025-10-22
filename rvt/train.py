@@ -207,10 +207,10 @@ def experiment(rank, cmd_args, devices, port):
 
         mvt_cfg.feat_dim = get_num_feat(exp_cfg.peract)
         
-        # Set trans_dim based on use_4point_pose for backward compatibility
+        # Set trans_dim based on use_3point_pose for backward compatibility
         mvt_cfg.defrost()
-        if exp_cfg.rvt.use_4point_pose:
-            mvt_cfg.trans_dim = 4  # Output 4 points
+        if hasattr(exp_cfg.rvt, 'use_3point_pose') and exp_cfg.rvt.use_3point_pose:
+            mvt_cfg.trans_dim = 3  # Output 3 points (p0=center, p1=x-axis, p2=z-axis)
         else:
             mvt_cfg.trans_dim = 1  # Output 1 point (original method)
         mvt_cfg.freeze()

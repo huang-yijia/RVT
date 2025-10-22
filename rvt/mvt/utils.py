@@ -19,155 +19,145 @@ import torch
 import torch.nn.functional as F
 from pytorch3d.transforms import matrix_to_rotation_6d
 
-def points4_to_pose(
+def points3_to_pose(
     p0: torch.Tensor,
     p1: torch.Tensor,
     p2: torch.Tensor,
-    p3: torch.Tensor,
     *,
     to_6d: bool = True,
-    close_thresh: float = 0.03,
     eps: float = 1e-8,
-    align_z_to_p3: bool = True,   # optional: make z point toward p3
+    align_z_to_p2: bool = True,
 ):
     """
-    From 4 point labels -> (Trans, Rot, gripper_open) - CORRECTED VERSION
+    Convert 3 points to pose (translation, rotation).
     
-    This function is now a true inverse of pose_to_points4.
-    The key correction: p3 now defines the positive z direction consistently.
-
-    Shapes: all inputs broadcastable to (..., 3)
+    This is the inverse of pose_to_points3.
+    
+    Point definitions:
+      - p0: Center/translation point
+      - p1: Point along positive x-axis (defines gripper width direction)
+      - p2: Point along positive z-axis (defines approach direction)
+    
+    Args:
+        p0: (..., 3) center point (translation)
+        p1: (..., 3) point along x-axis
+        p2: (..., 3) point along z-axis (approach direction)
+        to_6d: if True, return 6D rotation representation; else 3x3 matrix
+        eps: small epsilon for numerical stability
+        align_z_to_p2: ensure z-axis points toward p2
+        
     Returns:
-      trans: (..., 3)
-      rot:   (..., 6) if to_6d else (..., 3, 3)
-      is_open: (...,) boolean
+        trans: (..., 3) translation
+        rot: (..., 6) if to_6d else (..., 3, 3) rotation
     """
+    # 1. Translation is at p0
+    trans = p0
 
-    # 1. (P1 + P2)/2 == Trans
-    trans = (p1 + p2) / 2
+    # 2. X-axis: direction from p0 to p1
+    x = F.normalize(p1 - p0, dim=-1, eps=eps)
 
-    # 2. (P1 - P2)/|P1 - P2| == x (unit vector)
-    x = F.normalize(p1 - p2, dim=-1, eps=eps)
+    # 3. Z-axis: direction from p0 to p2
+    z = F.normalize(p2 - p0, dim=-1, eps=eps)
 
-    # 3. CORRECTED: (P3 - (P1+P2)/2)/|norm| == z (unit vector)
-    # Now p3 consistently defines the positive z direction
-    z = F.normalize(p3 - trans, dim=-1, eps=eps)
-
-    # 4. y = z × x (completing the right-handed coordinate system)
+    # 4. Y-axis: y = z × x (right-handed coordinate system)
     y = torch.cross(z, x, dim=-1)
     y = F.normalize(y, dim=-1, eps=eps)
 
-    # 5. Ensure orthogonality by recalculating x
+    # 5. Ensure orthogonality by recalculating x: x = y × z
     x = torch.cross(y, z, dim=-1)
     x = F.normalize(x, dim=-1, eps=eps)
 
-    # (Optional) Keep z roughly pointing toward P3 to match the figure's arrowing
-    if align_z_to_p3:
-        toward = torch.sum((p3 - trans) * z, dim=-1, keepdim=True)
+    # 6. (Optional) Ensure z points toward p2
+    if align_z_to_p2:
+        toward = torch.sum((p2 - p0) * z, dim=-1, keepdim=True)
         flip = torch.where(toward < 0, -1.0, 1.0)
+        x = x * flip
         y = y * flip
         z = z * flip
-        x = x * flip
 
-    # Stack columns as R = [c1, c2, c3] = [x, y, z]
+    # Stack columns as R = [x, y, z]
     R = torch.stack((x, y, z), dim=-1)  # (..., 3, 3)
-
-    # 6. |P0 - P3| < threshold : close ;  > threshold : open
-    gap = torch.linalg.vector_norm(p0 - p3, dim=-1)     # (...)
-    is_open = gap >= close_thresh                       # (...,) boolean
 
     # Output rotation in desired representation
     rot = matrix_to_rotation_6d(R) if to_6d else R
-    return trans, rot, is_open
+    return trans, rot
 
 
-def pose_to_points4(
+def pose_to_points3(
     trans: torch.Tensor,
     rot_matrix: torch.Tensor,
-    is_open: torch.Tensor,
     *,
-    gripper_width: float = 0.04,
-    gripper_length: float = 0.02,
+    x_offset: float = 0.02,  # Distance along x-axis for p1
+    z_offset: float = 0.02,  # Distance along z-axis for p2 (approach direction)
     eps: float = 1e-8,
 ):
     """
-    Convert pose (translation, rotation matrix, gripper state) to 4 points - CORRECTED VERSION
+    Convert pose (translation, rotation matrix) to 3 points.
     
-    This function is now a true inverse of points4_to_pose.
-    The key correction: p3 is positioned in the positive z direction consistently.
+    This is the inverse of points3_to_pose.
+    
+    Point definitions:
+      - p0: Center point (translation)
+      - p1: Point along positive x-axis (gripper width direction)
+      - p2: Point along positive z-axis (approach direction)
     
     Args:
         trans: (..., 3) translation
         rot_matrix: (..., 3, 3) rotation matrix
-        is_open: (...,) boolean gripper state
-        gripper_width: width of gripper when closed
-        gripper_length: length of gripper fingers
+        x_offset: distance from center along x-axis for p1
+        z_offset: distance from center along z-axis for p2
         eps: small epsilon for numerical stability
         
     Returns:
-        p0, p1, p2, p3: (..., 3) four points representing the gripper pose
+        p0, p1, p2: (..., 3) three points representing the pose
     """
     # Extract rotation axes from rotation matrix
     x_axis = rot_matrix[..., :, 0]  # (..., 3)
     y_axis = rot_matrix[..., :, 1]  # (..., 3)
     z_axis = rot_matrix[..., :, 2]  # (..., 3)
     
-    # Calculate gripper finger positions
-    # P1 and P2 are the gripper finger tips along x-axis
-    p1 = trans + (gripper_width / 2) * x_axis
-    p2 = trans - (gripper_width / 2) * x_axis
+    # p0 is the center (translation)
+    p0 = trans
     
-    # CORRECTED: P3 is the approach direction along positive z-axis
-    # This ensures consistency with points4_to_pose reconstruction
-    p3 = trans + gripper_length * z_axis
+    # p1 is offset along the x-axis (gripper width direction)
+    p1 = trans + x_offset * x_axis
     
-    # P0 is the gripper base position - distance from P3 indicates gripper state
-    # When gripper is closed, P0 is close to P3 (gap < threshold)
-    # When gripper is open, P0 is far from P3 (gap >= threshold)
-    # P0 is positioned along the opposite direction of z-axis from trans
-    p0_distance = torch.where(
-        is_open,
-        torch.tensor(gripper_length + 0.025, device=trans.device),  # Open: far from P3
-        torch.tensor(gripper_length + 0.005, device=trans.device),  # Closed: close to P3
-    )
-    # Place p0 in the negative z direction from trans
-    p0 = trans - p0_distance.unsqueeze(-1) * z_axis
+    # p2 is offset along the z-axis (approach direction)
+    p2 = trans + z_offset * z_axis
     
-    return p0, p1, p2, p3
+    return p0, p1, p2
 
 
-def pose_to_points4_from_quat(
+def pose_to_points3_from_quat(
     trans: torch.Tensor,
     quat: torch.Tensor,
-    is_open: torch.Tensor,
     *,
-    gripper_width: float = 0.04,
-    gripper_length: float = 0.02,
+    x_offset: float = 0.02,
+    z_offset: float = 0.02,
     eps: float = 1e-8,
 ):
     """
-    Convert pose (translation, quaternion, gripper state) to 4 points.
+    Convert pose (translation, quaternion) to 3 points.
     Convenience function that handles quaternion input.
     
     Args:
         trans: (..., 3) translation
-        quat: (..., 4) quaternion in xyzw format
-        is_open: (...,) boolean gripper state
-        gripper_width: width of gripper when closed
-        gripper_length: length of gripper fingers
+        quat: (..., 4) quaternion (w, x, y, z) format
+        x_offset: distance from center along x-axis for p1
+        z_offset: distance from center along z-axis for p2
         eps: small epsilon for numerical stability
         
     Returns:
-        p0, p1, p2, p3: (..., 3) four points representing the gripper pose
+        p0, p1, p2: (..., 3) three points representing the pose
     """
     # Convert quaternion to rotation matrix
     from pytorch3d.transforms import quaternion_to_matrix
     rot_matrix = quaternion_to_matrix(quat)
     
     # Use the main function
-    return pose_to_points4(trans, rot_matrix, is_open, 
-                          gripper_width=gripper_width, 
-                          gripper_length=gripper_length, 
+    return pose_to_points3(trans, rot_matrix, 
+                          x_offset=x_offset, 
+                          z_offset=z_offset, 
                           eps=eps)
 
 
