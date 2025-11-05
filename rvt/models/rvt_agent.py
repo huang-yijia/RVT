@@ -84,7 +84,7 @@ def eval_all(
 ):
     bs = len(wpt)
     assert wpt.shape == (bs, 3), wpt
-    # pred_wpt now has shape (bs, 4, 3) - use only the first waypoint for evaluation
+    # pred_wpt has shape (bs, 1, 3) from get_pred - extract the waypoint
     if len(pred_wpt.shape) == 3:
         pred_wpt = pred_wpt[:, 0, :]  # Take only the first waypoint (bs, 3)
     assert pred_wpt.shape == (bs, 3), pred_wpt
@@ -169,7 +169,7 @@ def manage_eval_log(
 ):
     bs = len(wpt)
     assert wpt.shape == (bs, 3), wpt
-    # pred_wpt now has shape (bs, 4, 3) - use only the first waypoint for evaluation
+    # pred_wpt has shape (bs, 1, 3) from get_pred - extract the waypoint
     if len(pred_wpt.shape) == 3:
         pred_wpt = pred_wpt[:, 0, :]  # Take only the first waypoint (bs, 3)
     assert pred_wpt.shape == (bs, 3), pred_wpt
@@ -772,8 +772,8 @@ class RVTAgent:
                     trans_loss_p1 = self._cross_entropy_loss(q_trans[..., 1], action_trans[..., 1]).mean()
                     trans_loss_p2 = self._cross_entropy_loss(q_trans[..., 2], action_trans[..., 2]).mean()
                     
-                    # Total translation loss is sum of all 3 points
-                    trans_loss = trans_loss_p0 + trans_loss_p1 + trans_loss_p2
+                    # Total translation loss is average of all 3 points (not sum, to match original scale)
+                    trans_loss = (trans_loss_p0 + trans_loss_p1 + trans_loss_p2) / 3.0
                     
                     # Gripper loss (same as original)
                     grip_loss = self._cross_entropy_loss(

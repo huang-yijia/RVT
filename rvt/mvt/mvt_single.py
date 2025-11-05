@@ -102,7 +102,7 @@ class MVT(nn.Module):
         :param use_point_renderer: whether to use the point renderer or not
         :param pe_fix: matter only when add_lang is True
             Either:
-                True: use position embedding only for image topkens
+                True: use position embedding only for image tokens
                 False: use position embedding for lang and image token
         :param feat_ver: whether to max pool final features or use soft max
             values using the heamtmap
@@ -334,7 +334,7 @@ class MVT(nn.Module):
             # 3D translation decoder (Heatmap)
             self.trans_decoder = Conv2DBlock(
                 self.final_dim, # 64
-                self.trans_dim, # 1
+                self.trans_dim, # 3 (3-point pose), 1 (original method)
                 kernel_sizes=3,
                 strides=1,
                 norm=None,
