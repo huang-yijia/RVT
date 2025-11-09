@@ -597,6 +597,8 @@ class MVT(nn.Module):
                         out={"trans": trans_first_point.clone().detach()},
                         dyn_cam_info=None,
                     )
+                    # get_wpt returns (bs, 1, 3) for single point, need to squeeze to (bs, 3)
+                    wpt_local = wpt_local.squeeze(1)
 
                 # projection
                 # (bs, 1, num_img, 2)

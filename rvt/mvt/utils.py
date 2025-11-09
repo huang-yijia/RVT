@@ -87,8 +87,8 @@ def pose_to_points3(
     trans: torch.Tensor,
     rot_matrix: torch.Tensor,
     *,
-    x_offset: float = 0.05,  # Distance along x-axis for p1 (increased for better separation)
-    z_offset: float = 0.05,  # Distance along z-axis for p2 (increased for better separation)
+    x_offset: float = 0.15,  # Distance along x-axis for p1 (increased from 0.05 for better separation)
+    z_offset: float = 0.15,  # Distance along z-axis for p2 (increased from 0.05 for better separation)
     eps: float = 1e-8,
 ):
     """
@@ -132,8 +132,8 @@ def pose_to_points3_from_quat(
     trans: torch.Tensor,
     quat: torch.Tensor,
     *,
-    x_offset: float = 0.05,
-    z_offset: float = 0.05,
+    x_offset: float = 0.15,  # Increased from 0.05 for better point separation
+    z_offset: float = 0.15,  # Increased from 0.05 for better point separation
     eps: float = 1e-8,
 ):
     """
